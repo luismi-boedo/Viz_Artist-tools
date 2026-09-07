@@ -1,0 +1,542 @@
+@registerParametersBegin
+
+@registerParameterSampler2D(AlbedoMap, "Room Texture")
+@registerParameterColor(AlbedoColor, "Room Color", 255, 255, 255, 255)
+
+@registerParameterFloat(Brightness, "Brightness", 1.0f, 0.0f, 5.0f)
+@registerParameterFloat(Saturation, "Saturation", 1.0f, 0.0f, 2.0f)
+
+@registerParameterFloat(RoomDepth, "Room Depth", 2.0f, 0.1f, 10.0f)
+
+@registerParameterFloat(UVScaleX, "UV Scale X", 1.0f, 0.01f, 4.0f)
+@registerParameterFloat(UVScaleY, "UV Scale Y", 1.0f, 0.01f, 4.0f)
+@registerParameterFloat(UVOffsetX, "UV Offset X", 0.0f, -1.0f, 1.0f)
+@registerParameterFloat(UVOffsetY, "UV Offset Y", 0.0f, -1.0f, 1.0f)
+
+@registerParametersEnd
+
+
+// ==========================================================
+// SATURATION
+// ==========================================================
+
+vec3 applySaturation(vec3 color, float saturation)
+{
+    float luminance =
+        dot(
+            color,
+            vec3(0.2126, 0.7152, 0.0722)
+        );
+
+    return mix(
+        vec3(luminance),
+        color,
+        saturation
+    );
+}
+
+
+// ==========================================================
+// UV DEL ATLAS CUADRADO 1:1
+//
+// Layout 3x3:
+//
+// [     ][CEILING][     ]
+// [ LEFT][ BACK  ][RIGHT]
+// [     ][ FLOOR ][     ]
+//
+// UV origin: bottom-left
+//
+// row 2 = top
+// row 1 = middle
+// row 0 = bottom
+// ==========================================================
+
+vec2 getAtlasUV(vec2 faceUV, int wall)
+{
+    vec2 cellSize =
+        vec2(
+            1.0 / 3.0,
+            1.0 / 3.0
+        );
+
+    vec2 cell =
+        vec2(0.0);
+
+    if(wall == 0)
+    {
+        // BACK = centro
+        cell = vec2(1.0, 1.0);
+    }
+    else if(wall == 1)
+    {
+        // LEFT = izquierda centro
+        cell = vec2(0.0, 1.0);
+    }
+    else if(wall == 2)
+    {
+        // RIGHT = derecha centro
+        cell = vec2(2.0, 1.0);
+    }
+    else if(wall == 3)
+    {
+        // FLOOR = centro abajo
+        cell = vec2(1.0, 0.0);
+    }
+    else
+    {
+        // CEILING = centro arriba
+        cell = vec2(1.0, 2.0);
+    }
+
+    return
+        cell * cellSize
+        +
+        faceUV * cellSize;
+}
+
+
+// ==========================================================
+// AJUSTE MANUAL UV
+// ==========================================================
+
+vec2 applyUVAdjust(vec2 uv)
+{
+    vec2 centered =
+        uv - vec2(0.5);
+
+    centered.x *=
+        userParametersFS.UVScaleX;
+
+    centered.y *=
+        userParametersFS.UVScaleY;
+
+    uv =
+        centered
+        +
+        vec2(0.5);
+
+    uv.x +=
+        userParametersFS.UVOffsetX;
+
+    uv.y +=
+        userParametersFS.UVOffsetY;
+
+    return uv;
+}
+
+
+// ==========================================================
+// MAIN
+// ==========================================================
+
+void fragmentMain()
+{
+    // ------------------------------------------------------
+    // UV DEL RECTANGLE
+    // ------------------------------------------------------
+
+    vec2 uv =
+        viz_getTexCoord();
+
+
+    // ------------------------------------------------------
+    // ABERTURA CUADRADA FIJA
+    //
+    // X = -1 .. +1
+    // Y = -1 .. +1
+    //
+    // Width y Height quedan bloqueados.
+    // ------------------------------------------------------
+
+    vec2 roomPos =
+        uv * 2.0 - 1.0;
+
+
+    // ------------------------------------------------------
+    // BASE LOCAL
+    // ------------------------------------------------------
+
+    vec3 T =
+        normalize(
+            viz_getTangent()
+        );
+
+    vec3 B =
+        normalize(
+            viz_getBinormal()
+        );
+
+    vec3 N =
+        normalize(
+            viz_getNormal()
+        );
+
+
+    // ------------------------------------------------------
+    // POSICIONES
+    // ------------------------------------------------------
+
+    vec3 worldPos =
+        viz_getPosition();
+
+    vec3 cameraPos =
+        viz_getCameraPosition();
+
+
+    // ------------------------------------------------------
+    // RAYO CAMARA -> FRAGMENT
+    // ------------------------------------------------------
+
+    vec3 rayWorld =
+        normalize(
+            worldPos - cameraPos
+        );
+
+
+    // ------------------------------------------------------
+    // WORLD -> ROOM SPACE
+    // ------------------------------------------------------
+
+    vec3 rayDir;
+
+    rayDir.x =
+        dot(
+            rayWorld,
+            T
+        );
+
+    rayDir.y =
+        dot(
+            rayWorld,
+            B
+        );
+
+    rayDir.z =
+        dot(
+            rayWorld,
+            -N
+        );
+
+    rayDir =
+        normalize(
+            rayDir
+        );
+
+
+    // ------------------------------------------------------
+    // ORIGEN DEL RAYO
+    // ------------------------------------------------------
+
+    vec3 rayOrigin =
+        vec3(
+            roomPos.x,
+            roomPos.y,
+            0.0
+        );
+
+
+    // ------------------------------------------------------
+    // DIMENSIONES DE LA HABITACION
+    //
+    // Width  = 2
+    // Height = 2
+    // Depth  = variable
+    //
+    // RoomDepth = 2.0  => cubo 1:1:1
+    // ------------------------------------------------------
+
+    float halfSize =
+        1.0;
+
+    float roomDepth =
+        userParametersFS.RoomDepth;
+
+
+    // ------------------------------------------------------
+    // INTERSECCIONES
+    // ------------------------------------------------------
+
+    float huge =
+        100000.0;
+
+    float tLeft =
+        huge;
+
+    float tRight =
+        huge;
+
+    float tFloor =
+        huge;
+
+    float tCeiling =
+        huge;
+
+    float tBack =
+        huge;
+
+
+    // LEFT
+    if(rayDir.x < -0.0001)
+    {
+        tLeft =
+            (
+                -halfSize
+                -
+                rayOrigin.x
+            )
+            /
+            rayDir.x;
+    }
+
+    // RIGHT
+    if(rayDir.x > 0.0001)
+    {
+        tRight =
+            (
+                halfSize
+                -
+                rayOrigin.x
+            )
+            /
+            rayDir.x;
+    }
+
+    // FLOOR
+    if(rayDir.y < -0.0001)
+    {
+        tFloor =
+            (
+                -halfSize
+                -
+                rayOrigin.y
+            )
+            /
+            rayDir.y;
+    }
+
+    // CEILING
+    if(rayDir.y > 0.0001)
+    {
+        tCeiling =
+            (
+                halfSize
+                -
+                rayOrigin.y
+            )
+            /
+            rayDir.y;
+    }
+
+    // BACK
+    if(rayDir.z > 0.0001)
+    {
+        tBack =
+            roomDepth
+            /
+            rayDir.z;
+    }
+
+
+    // ------------------------------------------------------
+    // CARA MAS CERCANA
+    //
+    // 0 = BACK
+    // 1 = LEFT
+    // 2 = RIGHT
+    // 3 = FLOOR
+    // 4 = CEILING
+    // ------------------------------------------------------
+
+    float t =
+        tBack;
+
+    int wall =
+        0;
+
+    if(tLeft > 0.0 && tLeft < t)
+    {
+        t = tLeft;
+        wall = 1;
+    }
+
+    if(tRight > 0.0 && tRight < t)
+    {
+        t = tRight;
+        wall = 2;
+    }
+
+    if(tFloor > 0.0 && tFloor < t)
+    {
+        t = tFloor;
+        wall = 3;
+    }
+
+    if(tCeiling > 0.0 && tCeiling < t)
+    {
+        t = tCeiling;
+        wall = 4;
+    }
+
+
+    // ------------------------------------------------------
+    // POSICION DE IMPACTO
+    // ------------------------------------------------------
+
+    vec3 hitPosition =
+        rayOrigin
+        +
+        rayDir * t;
+
+
+    // ------------------------------------------------------
+    // UV LOCAL DE LA CARA
+    // ------------------------------------------------------
+
+    vec2 faceUV =
+        vec2(0.0);
+
+
+    // BACK
+    if(wall == 0)
+    {
+        faceUV.x =
+            hitPosition.x * 0.5 + 0.5;
+
+        faceUV.y =
+            hitPosition.y * 0.5 + 0.5;
+    }
+
+    // LEFT
+    else if(wall == 1)
+    {
+        faceUV.x =
+            hitPosition.z
+            /
+            roomDepth;
+
+        faceUV.y =
+            hitPosition.y * 0.5 + 0.5;
+    }
+
+    // RIGHT
+    else if(wall == 2)
+    {
+        faceUV.x =
+            1.0
+            -
+            (
+                hitPosition.z
+                /
+                roomDepth
+            );
+
+        faceUV.y =
+            hitPosition.y * 0.5 + 0.5;
+    }
+
+    // FLOOR
+    else if(wall == 3)
+    {
+        faceUV.x =
+            hitPosition.x * 0.5 + 0.5;
+
+        faceUV.y =
+            1.0
+            -
+            (
+                hitPosition.z
+                /
+                roomDepth
+            );
+    }
+
+    // CEILING
+    else
+    {
+        faceUV.x =
+            hitPosition.x * 0.5 + 0.5;
+
+        faceUV.y =
+            hitPosition.z
+            /
+            roomDepth;
+    }
+
+
+    // ------------------------------------------------------
+    // SEGURIDAD
+    // ------------------------------------------------------
+
+    faceUV =
+        clamp(
+            faceUV,
+            vec2(0.0),
+            vec2(1.0)
+        );
+
+
+    // ------------------------------------------------------
+    // FACE UV -> ATLAS UV
+    // ------------------------------------------------------
+
+    vec2 finalUV =
+        getAtlasUV(
+            faceUV,
+            wall
+        );
+
+
+    // ------------------------------------------------------
+    // AJUSTE MANUAL FINO
+    // ------------------------------------------------------
+
+    finalUV =
+        applyUVAdjust(
+            finalUV
+        );
+
+    finalUV =
+        clamp(
+            finalUV,
+            vec2(0.0),
+            vec2(1.0)
+        );
+
+
+    // ------------------------------------------------------
+    // TEXTURA
+    // ------------------------------------------------------
+
+    vec4 roomColor =
+        texture(
+            AlbedoMap,
+            finalUV
+        );
+
+
+    // ------------------------------------------------------
+    // COLOR
+    // ------------------------------------------------------
+
+    roomColor *=
+        userParametersFS.AlbedoColor;
+
+    roomColor.rgb =
+        applySaturation(
+            roomColor.rgb,
+            userParametersFS.Saturation
+        );
+
+    roomColor.rgb *=
+        userParametersFS.Brightness;
+
+
+    // ------------------------------------------------------
+    // OUTPUT
+    // ------------------------------------------------------
+
+    viz_setFragment(
+        roomColor
+    );
+}
